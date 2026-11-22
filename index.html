@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<meta name="theme-color" content="#04010b" />
+<title>Merry Christmas · 圣诞粒子树</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #04010b;
+  }
+  body {
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    color: #f4eaff;
+    cursor: grab;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body.dragging { cursor: grabbing; }
+
+  #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+  .hud { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+
+  /* ---- 主标题 ---- */
+  .greet { position: absolute; left: 6.5vw; top: 20vh; transform-origin: left top; }
+  .greet-en {
+    margin: 0; font-weight: 400; white-space: nowrap;
+    font-family: "Segoe Script", "Ink Free", "Brush Script MT", "Lucida Handwriting", cursive;
+    font-size: clamp(30px, 4.3vw, 62px);
+    line-height: 1.08;
+    color: #fff;
+    text-shadow:
+      0 0 2px rgba(255,255,255,.95),
+      0 0 10px rgba(255,205,255,.85),
+      0 0 26px rgba(212,140,255,.7),
+      0 0 58px rgba(150,80,255,.5),
+      0 0 110px rgba(110,50,220,.32);
+    animation: breathe 6s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%, 100% { opacity: .9; filter: brightness(1); }
+    50%      { opacity: 1;  filter: brightness(1.16); }
+  }
+  .greet-zh {
+    margin: .85em 0 0 .4em;
+    font-size: clamp(11px, 1.1vw, 14px);
+    letter-spacing: .42em;
+    color: rgba(232,206,255,.7);
+    text-shadow: 0 0 12px rgba(180,120,255,.55);
+  }
+
+  /* ---- 操作提示 ---- */
+  .hint {
+    position: absolute; left: 50%; bottom: 3.4vh; transform: translateX(-50%);
+    font-size: 12px; letter-spacing: .18em; white-space: nowrap;
+    color: rgba(214,196,255,.42);
+    transition: opacity 1.4s ease;
+  }
+  .hint.hide { opacity: 0; }
+
+  /* ---- 竖屏排版 ---- */
+  @media (max-aspect-ratio: 3/4) {
+    .greet { left: 0; right: 0; top: 4vh; text-align: center; }
+    .greet-en { font-size: clamp(26px, 7vw, 42px); }
+    .greet-zh { margin-left: 0; margin-top: .55em; letter-spacing: .26em; font-size: 11px; }
+    .hint { bottom: 2.2vh; font-size: 11px; letter-spacing: .1em; }
+  }
+</style>
+</head>
+<body>
+<canvas id="scene" aria-label="粒子圣诞树"></canvas>
+
+<div class="hud">
+  <div class="greet">
+    <h1 class="greet-en">Merry Christmas</h1>
+    <p class="greet-zh">圣诞快乐 · 愿所有美好如约而至</p>
+  </div>
+  <div class="hint" id="hint">拖动旋转 · 滚轮缩放 · 双击复位</div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const TAU = Math.PI * 2;
+  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+
+  const canvas = document.getElementById('scene');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const hintEl = document.getElementById('hint');
+
+  /* ============================================================
+     画质系数：弱设备 / 手机自动降粒子数
+     ============================================================ */
+  const Q = (() => {
+    const mobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    const cores = navigator.hardwareConcurrency || 4;
+    const area = window.innerWidth * window.innerHeight;
+    if (mobile || cores <= 4 || area > 2.6e6) return 0.6;
+    return 1;
+  })();
+
+  /* ============================================================
+     预烘焙精灵（一次生成，逐帧 drawImage，纯加法混合）
+     ============================================================ */
+  const PALETTE = {
+    white:   { rgb: [255, 255, 255], core: true  },
+    ice:     { rgb: [198, 224, 255], core: true  },
+    pink:    { rgb: [255, 186, 232], core: true  },
+    lilac:   { rgb: [206, 168, 255], core: false },
+    violet:  { rgb: [146, 96, 246],  core: false },
+    magenta: { rgb: [255, 96, 214],  core: false },
+    gold:    { rgb: [255, 198, 122], core: true  },
+    rose:    { rgb: [255, 142, 188], core: false },
+    deep:    { rgb: [92, 56, 186],   core: false },
+  };
+  const NAMES = Object.keys(PALETTE);
+  const SPR = Object.create(null);
+
+  function glowSprite(rgb, core) {
+    const S = 64;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    const [r, gr, b] = rgb;
+    const gd = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    if (core) {
+      gd.addColorStop(0.00, 'rgba(255,255,255,1)');
+      gd.addColorStop(0.16, `rgba(${Math.min(255, r + 40)},${Math.min(255, gr + 28)},${Math.min(255, b + 16)},0.92)`);
+      gd.addColorStop(0.42, `rgba(${r},${gr},${b},0.30)`);
+      gd.addColorStop(0.72, `rgba(${r},${gr},${b},0.075)`);
+      gd.addColorStop(1.00, `rgba(${r},${gr},${b},0)`);
+    } else {
+      gd.addColorStop(0.00, `rgba(${r},${gr},${b},0.95)`);
+      gd.addColorStop(0.32, `rgba(${r},${gr},${b},0.42)`);
+      gd.addColorStop(0.66, `rgba(${r},${gr},${b},0.10)`);
+      gd.addColorStop(1.00, `rgba(${r},${gr},${b},0)`);
+    }
+    g.fillStyle = gd;
+    g.beginPath();
+    g.arc(S / 2, S / 2, S / 2, 0, TAU);
+    g.fill();
+    return c;
+  }
+
+  // 小尺寸粒子专用：小图 + 紧实核心，缩到 2~4px 也不会被平均掉
+  function dotSprite(rgb) {
+    const S = 16;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    const [r, gr, b] = rgb;
+    const gd = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    gd.addColorStop(0.00, `rgba(${Math.min(255, r + 30)},${Math.min(255, gr + 30)},${Math.min(255, b + 30)},1)`);
+    gd.addColorStop(0.34, `rgba(${r},${gr},${b},0.92)`);
+    gd.addColorStop(0.62, `rgba(${r},${gr},${b},0.42)`);
+    gd.addColorStop(0.85, `rgba(${r},${gr},${b},0.10)`);
+    gd.addColorStop(1.00, `rgba(${r},${gr},${b},0)`);
+    g.fillStyle = gd;
+    g.beginPath();
+    g.arc(S / 2, S / 2, S / 2, 0, TAU);
+    g.fill();
+    return c;
+  }
+
+  for (const n of NAMES) {
+    SPR[n] = { glow: glowSprite(PALETTE[n].rgb, PALETTE[n].core), dot: dotSprite(PALETTE[n].rgb) };
+  }
+
+  // 焦外光斑（bokeh）
+  function bokehSprite(rgb) {
+    const S = 128;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    const [r, gr, b] = rgb;
+    const gd = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    gd.addColorStop(0.00, `rgba(${r},${gr},${b},0.52)`);
+    gd.addColorStop(0.58, `rgba(${r},${gr},${b},0.40)`);
+    gd.addColorStop(0.86, `rgba(${r},${gr},${b},0.26)`);
+    gd.addColorStop(1.00, `rgba(${r},${gr},${b},0)`);
+    g.fillStyle = gd;
+    g.beginPath();
+    g.arc(S / 2, S / 2, S / 2, 0, TAU);
+    g.fill();
+    return c;
+  }
+  const BOKEH = {};
+  for (const [k, rgb] of [['lilac', [206, 170, 255]], ['rose', [255, 170, 210]], ['ice', [210, 228, 255]]]) {
+    const s = bokehSprite(rgb);
+    BOKEH[k] = { glow: s, dot: s };
+  }
+  const BOKEH_NAMES = Object.keys(BOKEH);
+
+  // 顶部四芒星
+  function flareSprite() {
+    const S = 512, R = S / 2;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    g.globalCompositeOperation = 'lighter';
+
+    const gd = g.createRadialGradient(R, R, 0, R, R, R);
+    gd.addColorStop(0.00, 'rgba(255,255,255,1)');
+    gd.addColorStop(0.08, 'rgba(255,248,255,0.92)');
+    gd.addColorStop(0.18, 'rgba(248,220,255,0.5)');
+    gd.addColorStop(0.34, 'rgba(216,170,255,0.18)');
+    gd.addColorStop(0.62, 'rgba(180,120,255,0.05)');
+    gd.addColorStop(1.00, 'rgba(150,90,255,0)');
+    g.fillStyle = gd;
+    g.beginPath(); g.arc(R, R, R, 0, TAU); g.fill();
+
+    // 主十字与副十字光芒
+    const spikes = [
+      { len: R,      thin: 0.030, a: 0.95, rot: 0 },
+      { len: R,      thin: 0.030, a: 0.95, rot: Math.PI / 2 },
+      { len: R * 0.62, thin: 0.020, a: 0.55, rot: Math.PI / 4 },
+      { len: R * 0.62, thin: 0.020, a: 0.55, rot: -Math.PI / 4 },
+    ];
+    for (const s of spikes) {
+      g.save();
+      g.translate(R, R);
+      g.rotate(s.rot);
+      const lg = g.createLinearGradient(-s.len, 0, s.len, 0);
+      lg.addColorStop(0.00, 'rgba(230,200,255,0)');
+      lg.addColorStop(0.28, `rgba(255,240,255,${s.a * 0.35})`);
+      lg.addColorStop(0.50, `rgba(255,255,255,${s.a})`);
+      lg.addColorStop(0.72, `rgba(255,240,255,${s.a * 0.35})`);
+      lg.addColorStop(1.00, 'rgba(230,200,255,0)');
+      g.fillStyle = lg;
+      g.beginPath();
+      g.moveTo(-s.len, 0);
+      g.lineTo(0, -s.len * s.thin);
+      g.lineTo(s.len, 0);
+      g.lineTo(0, s.len * s.thin);
+      g.closePath();
+      g.fill();
+      g.restore();
+    }
+    return c;
+  }
+  const FLARE = flareSprite();
+
+  /* ============================================================
+     场景尺寸 / 相机
+     ============================================================ */
+  let W = 0, H = 0, DPR = 1, focal = 1000;
+
+  const cam = {
+    yaw: -0.35,
+    pitch: 0.33,
+    zoom: 1,
+    baseDist: 20.5,
+    dist: 20.5,
+    targetY: 4.55,
+    vYaw: 0,
+  };
+  // 相机基向量（每帧更新）
+  let camX = 0, camY = 0, camZ = 0;
+  let fx = 0, fy = 0, fz = 0;
+  let rx = 1, ry = 0, rz = 0;
+  let ux = 0, uy = 1, uz = 0;
+
+  const TREE_H = 9.0;     // 树高（世界单位）
+  const TREE_R = 3.4;     // 树底半径
+  const TURNS = 7.0;      // 螺旋圈数
+  const GR = 9.8;         // 地面漩涡半径
+
+  /* ============================================================
+     几何生成
+     ============================================================ */
+  const TREE_COL = ['white', 'white', 'pink', 'ice', 'lilac', 'white', 'white'];
+  const tree = [];    // 树上粒子
+  const ground = [];  // 地面漩涡粒子
+  const stars = [];   // 背景星
+  const dust = [];    // 飘雪 / 浮尘
+  const bokehs = [];  // 焦外光斑
+
+  // 半径轮廓：圆锥 + 每圈起点的“裙摆”外扩，形成分层剪影
+  function radiusProfile(t) {
+    const turnPos = (t * TURNS) % 1;
+    const skirt = 1 + 0.085 * Math.pow(1 - turnPos, 2.2);
+    return Math.pow(1 - t, 1.08) * skirt;
+  }
+
+  function addTree() {
+    // 1) 主螺旋丝带 —— 树的主体
+    const per = Math.round(2700 * Q);
+    for (let i = 0; i < per; i++) {
+      const u = (i + Math.random()) / per;
+      const t = Math.pow(u, 1.4);               // 底部密、顶部疏，视觉亮度均匀
+      const prof = radiusProfile(t);            // 半径轮廓
+      const rad0 = TREE_R * prof;
+      const band = 0.12 + 0.5 * prof;           // 丝带半厚
+      const ang = t * TURNS * TAU + rand(-0.09, 0.09);
+      const off = (Math.random() + Math.random() - 1) * band;
+      const rad = Math.max(0.02, rad0 + off);
+      const big = Math.random() < 0.035;
+      tree.push({
+        x: Math.cos(ang) * rad,
+        y: t * TREE_H + rand(-1, 1) * (0.07 + 0.13 * prof),
+        z: Math.sin(ang) * rad,
+        sz: big ? rand(0.1, 0.19) : rand(0.032, 0.072),
+        a: big ? rand(0.9, 1.1) : rand(0.5, 1.0),
+        col: pick(TREE_COL),
+        ph: Math.random() * TAU,
+        fq: rand(0.9, 3.2),
+        ht: t,
+      });
+    }
+
+    // 2) 锥面铺满层：亮度按“离螺旋线的角距”调制，既实又保留螺旋纹
+    const surf = Math.round(4000 * Q);
+    for (let i = 0; i < surf; i++) {
+      const t = Math.pow(Math.random(), 1.35);
+      const prof = radiusProfile(t);
+      const ang = Math.random() * TAU;
+      const rad = TREE_R * prof * rand(0.8, 1.02);
+      const a0 = t * TURNS * TAU;
+      let d = ang - a0;
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      const wgt = Math.exp(-(d * d) / (2 * 0.46 * 0.46));   // 靠近螺旋线更亮
+      tree.push({
+        x: Math.cos(ang) * rad,
+        y: t * TREE_H + rand(-0.1, 0.1),
+        z: Math.sin(ang) * rad,
+        sz: rand(0.024, 0.058),
+        a: (0.13 + 0.72 * wgt) * rand(0.75, 1),
+        col: wgt > 0.5 ? pick(TREE_COL) : pick(['lilac', 'pink', 'ice', 'white']),
+        ph: Math.random() * TAU,
+        fq: rand(0.8, 3.0),
+        ht: t,
+      });
+    }
+
+    // 2b) 内部淡淡的体积雾
+    const fill = Math.round(1200 * Q);
+    for (let i = 0; i < fill; i++) {
+      const t = Math.pow(Math.random(), 0.9);
+      const prof = radiusProfile(t);
+      const rad = TREE_R * prof * Math.sqrt(Math.random()) * 0.8;
+      const ang = Math.random() * TAU;
+      tree.push({
+        x: Math.cos(ang) * rad,
+        y: t * TREE_H + rand(-0.08, 0.08),
+        z: Math.sin(ang) * rad,
+        sz: rand(0.02, 0.042),
+        a: rand(0.09, 0.22),
+        col: pick(['lilac', 'violet', 'pink']),
+        ph: Math.random() * TAU,
+        fq: rand(0.7, 2.2),
+        ht: t,
+      });
+    }
+
+    // 3) 树顶的“火苗”卷须
+    const curl = Math.round(150 * Q);
+    for (let i = 0; i < curl; i++) {
+      const u = i / curl;
+      const ang = -0.6 + u * 3.4;
+      const rad = 0.42 * (1 - u) * (0.5 + 0.5 * Math.sin(u * 3.1));
+      const x = Math.cos(ang) * rad * 0.9 + Math.sin(u * 2.4) * 0.34 * u;
+      const z = Math.sin(ang) * rad * 0.9;
+      const y = TREE_H - 0.25 + u * 0.95;
+      tree.push({
+        x: x + rand(-0.05, 0.05),
+        y: y + rand(-0.04, 0.04),
+        z: z + rand(-0.05, 0.05),
+        sz: rand(0.03, 0.075),
+        a: rand(0.35, 0.85),
+        col: pick(['white', 'pink', 'white']),
+        ph: Math.random() * TAU,
+        fq: rand(1.4, 3.4),
+        ht: 1,
+      });
+    }
+
+    // 4) 树根处的暖金色光点
+    for (let i = 0; i < Math.round(70 * Q); i++) {
+      const ang = Math.random() * TAU;
+      const rad = rand(0.15, 1.5);
+      tree.push({
+        x: Math.cos(ang) * rad,
+        y: rand(0.02, 0.55),
+        z: Math.sin(ang) * rad,
+        sz: rand(0.03, 0.08),
+        a: rand(0.3, 0.8),
+        col: pick(['gold', 'gold', 'white']),
+        ph: Math.random() * TAU,
+        fq: rand(0.8, 2.0),
+        ht: 0.02,
+      });
+    }
+  }
+
+  function addGround() {
+    const ringCol = (r) => {
+      if (r < 1.2) return pick(['gold', 'white', 'pink', 'lilac']);
+      if (r < 3.2) return pick(['lilac', 'violet', 'pink', 'white', 'lilac']);
+      if (r < 6.2) return pick(['violet', 'magenta', 'violet', 'lilac', 'deep']);
+      return pick(['deep', 'violet', 'deep', 'lilac']);
+    };
+
+    // 同心涟漪环（间距由内向外递增），点的直径略大于间距 → 连成发光的环
+    const rings = [0.6, 0.78, 1.0, 1.28, 1.64, 2.1, 2.68, 3.4, 4.3, 5.4, 6.8, 8.4, 9.7];
+    for (let k = 0; k < rings.length; k++) {
+      const ring = rings[k];
+      const n = Math.max(30, Math.round(TAU * ring * 17 * Q));
+      const bright = 0.55 + 0.45 * Math.sin(k * 1.35 + 0.6) ** 2;
+      const rim = k === rings.length - 1 ? 1.5 : 1;
+      for (let i = 0; i < n; i++) {
+        const ang = (i / n) * TAU + rand(-0.018, 0.018);
+        // 角度扰动：制造“流丝”缺口，避免完美同心圆
+        const streak = 0.5 + 0.5 * Math.sin(ang * 5 + k * 1.9);
+        if (Math.random() < 0.28 * (1 - streak)) continue;
+        const wobble = 1 + 0.028 * Math.sin(2 * ang + k * 0.9) + 0.018 * Math.sin(5 * ang - k * 1.3);
+        const rr = ring * wobble * rand(0.99, 1.01);
+        const fade = 1 - clamp((rr - 6.0) / (GR - 6.0), 0, 1) * 0.55;
+        const inner = rr < 1.3 ? 0.55 + 0.35 * (rr / 1.3) : 1;
+        ground.push({
+          r: rr,
+          ang,
+          w: (0.05 + 1.0 / (rr + 1.1)) * rand(0.85, 1.15),  // 差速自转
+          y: rand(-0.04, 0.04),
+          sz: rand(0.05, 0.1) * (0.85 + 0.3 * Math.random()),
+          a: rand(0.28, 0.66) * bright * fade * rim * inner * (0.55 + 0.55 * streak),
+          col: ringCol(rr),
+          ph: rr * 1.7 + Math.random() * 0.8,
+          fq: rand(0.7, 2.0),
+        });
+      }
+    }
+
+    // 弥散的尘雾（填满盘面，避免只剩线框）
+    for (let i = 0; i < Math.round(2400 * Q); i++) {
+      const rr = GR * Math.sqrt(Math.random());
+      const fade = 1 - clamp((rr - 5.6) / (GR - 5.6), 0, 1) * 0.75;
+      ground.push({
+        r: rr,
+        ang: Math.random() * TAU,
+        w: (0.05 + 1.0 / (rr + 1.1)) * rand(0.8, 1.2),
+        y: rand(-0.12, 0.12),
+        sz: rand(0.03, 0.075),
+        a: rand(0.1, 0.32) * fade,
+        col: ringCol(rr),
+        ph: Math.random() * TAU,
+        fq: rand(0.5, 1.8),
+      });
+    }
+  }
+
+  function addSky() {
+    // 星空（球壳分布）
+    for (let i = 0; i < Math.round(520 * Q); i++) {
+      const th = Math.random() * TAU;
+      const ph = Math.acos(rand(-0.45, 1));
+      const R = rand(34, 64);
+      const big = Math.random() < 0.07;
+      stars.push({
+        x: R * Math.sin(ph) * Math.cos(th),
+        y: R * Math.cos(ph) + 1.5,
+        z: R * Math.sin(ph) * Math.sin(th),
+        sz: big ? rand(0.16, 0.3) : rand(0.04, 0.13),
+        a: big ? rand(0.5, 1) : rand(0.18, 0.75),
+        col: pick(['white', 'white', 'ice', 'pink', 'white']),
+        ph: Math.random() * TAU,
+        fq: rand(0.5, 2.6),
+      });
+    }
+
+    // 浮尘 / 细雪
+    for (let i = 0; i < Math.round(340 * Q); i++) {
+      dust.push({
+        x: rand(-15, 15),
+        y: rand(0, 17),
+        z: rand(-15, 15),
+        vy: -rand(0.12, 0.55),
+        sz: rand(0.03, 0.085),
+        a: rand(0.12, 0.55),
+        col: pick(['white', 'ice', 'lilac', 'white']),
+        ph: Math.random() * TAU,
+        fq: rand(1, 3),
+        sw: rand(0.2, 0.9),
+      });
+    }
+
+    // 焦外光斑
+    for (let i = 0; i < Math.round(46 * Q); i++) {
+      const rr = rand(2.5, 12);
+      const ang = Math.random() * TAU;
+      bokehs.push({
+        x: Math.cos(ang) * rr,
+        y: rand(0.4, 6.5),
+        z: Math.sin(ang) * rr,
+        sz: rand(0.22, 0.62),
+        a: rand(0.04, 0.11),
+        col: pick(BOKEH_NAMES),
+        vy: rand(0.03, 0.16),
+        ph: Math.random() * TAU,
+      });
+    }
+  }
+
+  addTree();
+  addGround();
+  addSky();
+
+  /* ============================================================
+     尺寸 / 背景 / 泛光缓冲
+     ============================================================ */
+  const backdrop = document.createElement('canvas');
+  const bctx = backdrop.getContext('2d');
+  const b0 = document.createElement('canvas');
+  const b0x = b0.getContext('2d');
+  const b1 = document.createElement('canvas');
+  const b1x = b1.getContext('2d');
+  const b2 = document.createElement('canvas');
+  const b2x = b2.getContext('2d');
+
+  function buildBackdrop() {
+    backdrop.width = canvas.width;
+    backdrop.height = canvas.height;
+    bctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    bctx.globalCompositeOperation = 'source-over';
+
+    // 底色
+    bctx.fillStyle = '#04010b';
+    bctx.fillRect(0, 0, W, H);
+
+    // 中央紫色星云
+    const rg = bctx.createRadialGradient(W * 0.5, H * 0.58, 0, W * 0.5, H * 0.58, Math.max(W, H) * 0.62);
+    rg.addColorStop(0.00, 'rgba(96,44,158,0.15)');
+    rg.addColorStop(0.34, 'rgba(56,22,104,0.07)');
+    rg.addColorStop(0.66, 'rgba(26,8,54,0.06)');
+    rg.addColorStop(1.00, 'rgba(4,1,11,0)');
+    bctx.fillStyle = rg;
+    bctx.fillRect(0, 0, W, H);
+
+    // 地面辉光
+    const rg2 = bctx.createRadialGradient(W * 0.5, H * 0.82, 0, W * 0.5, H * 0.82, Math.min(W, H) * 0.62);
+    rg2.addColorStop(0.00, 'rgba(122,62,196,0.1)');
+    rg2.addColorStop(0.45, 'rgba(66,22,120,0.09)');
+    rg2.addColorStop(1.00, 'rgba(4,1,11,0)');
+    bctx.fillStyle = rg2;
+    bctx.fillRect(0, 0, W, H);
+
+    // 暗角
+    const vg = bctx.createRadialGradient(W * 0.5, H * 0.5, Math.min(W, H) * 0.32, W * 0.5, H * 0.5, Math.max(W, H) * 0.86);
+    vg.addColorStop(0.00, 'rgba(0,0,0,0)');
+    vg.addColorStop(0.60, 'rgba(0,0,0,0.30)');
+    vg.addColorStop(1.00, 'rgba(0,0,0,0.9)');
+    bctx.fillStyle = vg;
+    bctx.fillRect(0, 0, W, H);
+  }
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.max(320, window.innerWidth);
+    H = Math.max(320, window.innerHeight);
+    canvas.width = Math.round(W * DPR);
+    canvas.height = Math.round(H * DPR);
+
+    focal = H * 1.45;
+    const aspect = W / H;
+    cam.baseDist = 20.5 * (aspect < 1 ? 1 + (1 - aspect) * 0.5 : 1);
+    // 竖屏时把画面整体下移一点，给顶部标题留出空间
+    cam.targetY = aspect < 1 ? 5.15 : 4.55;
+    cam.dist = cam.baseDist * cam.zoom;
+
+    buildBackdrop();
+
+    b0.width = Math.max(2, canvas.width >> 1);
+    b0.height = Math.max(2, canvas.height >> 1);
+    b1.width = Math.max(2, canvas.width >> 2);
+    b1.height = Math.max(2, canvas.height >> 2);
+    b2.width = Math.max(2, b1.width >> 1);
+    b2.height = Math.max(2, b1.height >> 1);
+  }
+
+  /* ============================================================
+     相机
+     ============================================================ */
+  function updateCamera(time, dt) {
+    const pitch = cam.pitch + Math.sin(time * 0.17) * 0.012;
+    const cp = Math.cos(pitch), sp = Math.sin(pitch);
+    const D = cam.dist;
+
+    cam.dist += ((cam.baseDist * cam.zoom) - cam.dist) * Math.min(1, dt * 6);
+
+    camX = Math.sin(cam.yaw) * cp * D;
+    camZ = Math.cos(cam.yaw) * cp * D;
+    camY = cam.targetY + sp * D;
+
+    let dx = -camX, dy = cam.targetY - camY, dz = -camZ;
+    const len = Math.hypot(dx, dy, dz) || 1;
+    fx = dx / len; fy = dy / len; fz = dz / len;
+
+    const rl = Math.hypot(fz, fx) || 1;
+    rx = -fz / rl; ry = 0; rz = fx / rl;
+
+    ux = -rz * fy;
+    uy = rz * fx - rx * fz;
+    uz = rx * fy;
+  }
+
+  /* ============================================================
+     绘制工具
+     ============================================================ */
+  // 自适应画质：持续掉帧时按比例跳过粒子（10 = 全画，7 / 5 = 降载）
+  let qKeep = 10;
+  let perfAcc = 0;
+  let perfN = 0;
+
+  const LOOKUP = (() => {
+    const m = Object.create(null);
+    for (const n of NAMES) m[n] = SPR[n];
+    return m;
+  })();
+
+  function blit(set, x, y, size, alpha) {
+    if (alpha <= 0.004 || size < 0.4) return;
+    ctx.globalAlpha = alpha > 1 ? 1 : alpha;
+    const img = size < 5.5 ? set.dot : set.glow;
+    ctx.drawImage(img, x - size * 0.5, y - size * 0.5, size, size);
+  }
+
+  /* ============================================================
+     各组粒子渲染
+     ============================================================ */
+  function drawTree(time) {
+    const T = tree;
+    for (let i = 0; i < T.length; i++) {
+      if (i % 10 >= qKeep) continue;
+      const p = T[i];
+      const dxp = p.x - camX, dyp = p.y - camY, dzp = p.z - camZ;
+      const cz = dxp * fx + dyp * fy + dzp * fz;
+      if (cz < 1.4) continue;
+      const cx = dxp * rx + dzp * rz;
+      const cyy = dxp * ux + dyp * uy + dzp * uz;
+      const sx = W * 0.5 + (cx / cz) * focal;
+      const sy = H * 0.5 - (cyy / cz) * focal;
+      const size = (p.sz * focal) / cz;
+      if (size < 0.45) continue;
+      if (sx < -60 || sx > W + 60 || sy < -60 || sy > H + 60) continue;
+
+      const df = cz < 14 ? 1 : 1 - (cz - 14) * 0.014;
+      // 沿树身的向上流光 + 各自的闪烁
+      const tw = 0.72 + 0.28 * Math.sin(p.ht * 11 - time * 2.0) + 0.1 * Math.sin(time * p.fq + p.ph);
+      blit(LOOKUP[p.col], sx, sy, size, p.a * tw * df);
+    }
+  }
+
+  function drawGround(time, dt) {
+    const A = ground;
+    for (let i = 0; i < A.length; i++) {
+      if (i % 10 >= qKeep) continue;
+      const p = A[i];
+      p.ang += p.w * dt;
+      const c = Math.cos(p.ang), s = Math.sin(p.ang);
+      const rr = p.r + Math.sin(time * 0.5 + p.ph) * 0.035;
+      const x = c * rr, z = s * rr;
+      const y = p.y + Math.sin(rr * 1.35 - time * 1.5 + p.ph) * 0.07;
+
+      const dxp = x - camX, dyp = y - camY, dzp = z - camZ;
+      const cz = dxp * fx + dyp * fy + dzp * fz;
+      if (cz < 1.4) continue;
+      const cx = dxp * rx + dzp * rz;
+      const cyy = dxp * ux + dyp * uy + dzp * uz;
+      const sx = W * 0.5 + (cx / cz) * focal;
+      const sy = H * 0.5 - (cyy / cz) * focal;
+      const size = (p.sz * focal) / cz;
+      if (size < 0.45) continue;
+      if (sx < -60 || sx > W + 60 || sy < -60 || sy > H + 60) continue;
+
+      const df = cz < 14 ? 1 : 1 - (cz - 14) * 0.014;
+      // 由内向外扩散的波纹 + 闪烁
+      const tw = 0.7 + 0.26 * Math.sin(p.r * 1.9 - time * 1.5) + 0.12 * Math.sin(time * p.fq + p.ph);
+      blit(LOOKUP[p.col], sx, sy, size, p.a * tw * df);
+    }
+  }
+
+  function drawSky(time) {
+    // 星
+    for (let i = 0; i < stars.length; i++) {
+      const p = stars[i];
+      const dxp = p.x - camX, dyp = p.y - camY, dzp = p.z - camZ;
+      const cz = dxp * fx + dyp * fy + dzp * fz;
+      if (cz < 1.4) continue;
+      const cx = dxp * rx + dzp * rz;
+      const cyy = dxp * ux + dyp * uy + dzp * uz;
+      const sx = W * 0.5 + (cx / cz) * focal;
+      const sy = H * 0.5 - (cyy / cz) * focal;
+      if (sx < -30 || sx > W + 30 || sy < -30 || sy > H + 30) continue;
+      const size = (p.sz * focal) / cz;
+      const tw = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(time * p.fq + p.ph));
+      blit(LOOKUP[p.col], sx, sy, size, p.a * tw);
+    }
+
+    // 浮尘 / 细雪
+    for (let i = 0; i < dust.length; i++) {
+      const p = dust[i];
+      p.y += p.vy * (1 / 60);
+      if (p.y < -1) p.y = 17;
+      const x = p.x + Math.sin(time * 0.6 + p.ph) * p.sw;
+      const z = p.z + Math.cos(time * 0.5 + p.ph) * p.sw;
+
+      const dxp = x - camX, dyp = p.y - camY, dzp = z - camZ;
+      const cz = dxp * fx + dyp * fy + dzp * fz;
+      if (cz < 1.4) continue;
+      const cx = dxp * rx + dzp * rz;
+      const cyy = dxp * ux + dyp * uy + dzp * uz;
+      const sx = W * 0.5 + (cx / cz) * focal;
+      const sy = H * 0.5 - (cyy / cz) * focal;
+      if (sx < -30 || sx > W + 30 || sy < -30 || sy > H + 30) continue;
+      const size = (p.sz * focal) / cz;
+      const tw = 0.6 + 0.4 * Math.sin(time * p.fq + p.ph);
+      blit(LOOKUP[p.col], sx, sy, size, p.a * tw * 0.9);
+    }
+
+    // 焦外光斑
+    for (let i = 0; i < bokehs.length; i++) {
+      const p = bokehs[i];
+      p.y += p.vy * (1 / 60);
+      if (p.y > 8) p.y = 0.2;
+      const dxp = p.x - camX, dyp = p.y - camY, dzp = p.z - camZ;
+      const cz = dxp * fx + dyp * fy + dzp * fz;
+      if (cz < 1.4) continue;
+      const cx = dxp * rx + dzp * rz;
+      const cyy = dxp * ux + dyp * uy + dzp * uz;
+      const sx = W * 0.5 + (cx / cz) * focal;
+      const sy = H * 0.5 - (cyy / cz) * focal;
+      const size = (p.sz * focal) / cz;
+      if (size < 2) continue;
+      blit(BOKEH[p.col], sx, sy, size, p.a * (0.75 + 0.25 * Math.sin(time * 0.7 + p.ph)));
+    }
+  }
+
+  // 树根暖光 + 地面整体辉光
+  function drawBaseGlow(time) {
+    const dxp = -camX, dyp = 0.4 - camY, dzp = -camZ;
+    const cz = dxp * fx + dyp * fy + dzp * fz;
+    if (cz < 1.4) return;
+    const cx = dxp * rx + dzp * rz;
+    const cyy = dxp * ux + dyp * uy + dzp * uz;
+    const sx = W * 0.5 + (cx / cz) * focal;
+    const sy = H * 0.5 - (cyy / cz) * focal;
+
+    const pulse = 0.85 + 0.15 * Math.sin(time * 1.7 + 1.2);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+
+    // 地面上的大范围柔光
+    const wgt = ((12.0 * focal) / cz) * 1.0;
+    ctx.globalAlpha = 0.05 * pulse;
+    ctx.drawImage(SPR.lilac.glow, sx - wgt / 2, sy - wgt * 0.19, wgt, wgt * 0.38);
+
+    // 树根处的暖金色光
+    const gs = (1.7 * focal) / cz;
+    ctx.globalAlpha = 0.34 * pulse;
+    ctx.drawImage(SPR.gold.glow, sx - gs / 2, sy - gs / 2, gs, gs);
+
+    ctx.restore();
+  }
+
+  function drawStar(time) {
+    // 树顶星的屏幕位置
+    const px = 0, py = TREE_H + 0.95, pz = 0;
+    const dxp = px - camX, dyp = py - camY, dzp = pz - camZ;
+    const cz = dxp * fx + dyp * fy + dzp * fz;
+    if (cz < 1.4) return;
+    const cx = dxp * rx + dzp * rz;
+    const cyy = dxp * ux + dyp * uy + dzp * uz;
+    const sx = W * 0.5 + (cx / cz) * focal;
+    const sy = H * 0.5 - (cyy / cz) * focal;
+
+    const pulse = 1 + 0.08 * Math.sin(time * 2.1);
+    const base = ((2.05 * focal) / cz) * pulse;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.translate(sx, sy);
+
+    // 外层柔光
+    ctx.globalAlpha = 0.32;
+    const halo = base * 2.1;
+    ctx.drawImage(SPR.white.glow, -halo / 2, -halo / 2, halo, halo);
+
+    // 四芒星本体（缓慢呼吸）
+    ctx.save();
+    ctx.rotate(Math.sin(time * 0.5) * 0.05);
+    const s = base * 1.15;
+    ctx.globalAlpha = 0.95;
+    ctx.drawImage(FLARE, -s / 2, -s / 2, s, s);
+    ctx.restore();
+
+    // 白色高光核
+    ctx.globalAlpha = 0.9;
+    const core = base * 0.42;
+    ctx.drawImage(SPR.white.glow, -core / 2, -core / 2, core, core);
+
+    ctx.restore();
+  }
+
+  /* ============================================================
+     泛光
+     ============================================================ */
+  function bloom() {
+    // 小半径：1/2 缩放叠加，做紧实的亮核辉光
+    b0x.setTransform(1, 0, 0, 1, 0, 0);
+    b0x.globalCompositeOperation = 'copy';
+    b0x.globalAlpha = 1;
+    b0x.drawImage(canvas, 0, 0, b0.width, b0.height);
+
+    // 大半径：1/4 → 1/8 再叠加，做弥散光晕
+    b1x.setTransform(1, 0, 0, 1, 0, 0);
+    b1x.globalCompositeOperation = 'copy';
+    b1x.globalAlpha = 1;
+    b1x.drawImage(b0, 0, 0, b1.width, b1.height);
+
+    b2x.setTransform(1, 0, 0, 1, 0, 0);
+    b2x.globalCompositeOperation = 'copy';
+    b2x.drawImage(b1, 0, 0, b2.width, b2.height);
+
+    b1x.globalCompositeOperation = 'lighter';
+    b1x.globalAlpha = 0.75;
+    b1x.drawImage(b2, 0, 0, b1.width, b1.height);
+    b1x.globalAlpha = 1;
+
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.22;
+    ctx.drawImage(b0, 0, 0, canvas.width, canvas.height);
+    ctx.globalAlpha = 0.3;
+    ctx.drawImage(b1, 0, 0, canvas.width, canvas.height);
+    ctx.restore();
+  }
+
+  /* ============================================================
+     交互
+     ============================================================ */
+  let dragging = false;
+  let dragX = 0, dragY = 0;
+  let idleTimer = 0;
+  let hintHidden = false;
+
+  function hideHint() {
+    if (hintHidden) return;
+    hintHidden = true;
+    hintEl.classList.add('hide');
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    dragging = true;
+    dragX = e.clientX; dragY = e.clientY;
+    cam.vYaw = 0;
+    document.body.classList.add('dragging');
+    canvas.setPointerCapture?.(e.pointerId);
+    hideHint();
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - dragX;
+    const dy = e.clientY - dragY;
+    dragX = e.clientX; dragY = e.clientY;
+    cam.yaw -= dx * 0.0055;
+    cam.vYaw = -dx * 0.012;
+    cam.pitch = clamp(cam.pitch + dy * 0.0032, -0.02, 0.72);
+    idleTimer = 0;
+  });
+
+  const endDrag = () => {
+    dragging = false;
+    document.body.classList.remove('dragging');
+    idleTimer = 0;
+  };
+  canvas.addEventListener('pointerup', endDrag);
+  window.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('pointerleave', endDrag);
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    cam.zoom = clamp(cam.zoom * Math.exp(-e.deltaY * 0.0009), 0.62, 2.0);
+    hideHint();
+  }, { passive: false });
+
+  canvas.addEventListener('dblclick', () => {
+    cam.zoom = 1;
+    cam.yaw = -0.35;
+    cam.pitch = 0.33;
+    cam.vYaw = 0;
+  });
+
+  window.addEventListener('resize', resize);
+
+  /* ============================================================
+     主循环
+     ============================================================ */
+  const params = new URLSearchParams(location.search);
+  let time = parseFloat(params.get('t')) || 0;
+  let last = performance.now();
+
+  resize();
+
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (!isFinite(dt) || dt <= 0) dt = 1 / 60;
+    dt = Math.min(dt, 0.05);
+    time += dt;
+
+    // 相机：自动环绕 + 拖拽惯性
+    if (!dragging) {
+      cam.yaw += cam.vYaw * dt;
+      cam.vYaw *= 0.92;
+    }
+    idleTimer += dt;
+    if (!dragging && idleTimer > 1.4) cam.yaw += 0.075 * dt;
+
+    updateCamera(time, dt);
+
+    // 自适应降载
+    perfAcc += dt;
+    perfN++;
+    if (perfN >= 90) {
+      const avg = perfAcc / perfN;
+      perfAcc = 0;
+      perfN = 0;
+      if (avg > 0.026) qKeep = qKeep > 7 ? 7 : 5;
+    }
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.drawImage(backdrop, 0, 0, W, H);
+
+    ctx.globalCompositeOperation = 'lighter';
+    drawSky(time);
+    drawGround(time, dt);
+    drawBaseGlow(time);
+    drawTree(time);
+    drawStar(time);
+    ctx.globalAlpha = 1;
+
+    bloom();
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+  setTimeout(hideHint, 9000);
+})();
+</script>
+</body>
+</html>
