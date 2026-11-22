@@ -79,7 +79,7 @@
     <h1 class="greet-en">Merry Christmas</h1>
     <p class="greet-zh">圣诞快乐 · 愿所有美好如约而至</p>
   </div>
-  <div class="hint" id="hint">拖动旋转 · 滚轮缩放 · 双击复位</div>
+  <div class="hint" id="hint">移动鼠标吹散粒子 · 点击爆开 · 拖动旋转</div>
 </div>
 
 <script>
@@ -247,6 +247,58 @@
   }
   const FLARE = flareSprite();
 
+  // 礼物盒精灵：交互时被吹散的彩色礼盒
+  function roundRect(g, x, y, w, h, r) {
+    g.beginPath();
+    g.moveTo(x + r, y);
+    g.lineTo(x + w - r, y);
+    g.quadraticCurveTo(x + w, y, x + w, y + r);
+    g.lineTo(x + w, y + h - r);
+    g.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    g.lineTo(x + r, y + h);
+    g.quadraticCurveTo(x, y + h, x, y + h - r);
+    g.lineTo(x, y + r);
+    g.quadraticCurveTo(x, y, x + r, y);
+    g.closePath();
+  }
+
+  function giftSprite(base, light) {
+    const S = 72;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    const pad = 9, hx = S / 2 - pad, x0 = pad, w = hx * 2;
+    const y0 = pad + 7, h = S - y0 - pad;
+
+    const gd = g.createLinearGradient(x0, y0, x0 + w * 0.6, y0 + h);
+    gd.addColorStop(0, light);
+    gd.addColorStop(1, base);
+    g.fillStyle = gd;
+    roundRect(g, x0, y0, w, h, 6);
+    g.fill();
+
+    g.fillStyle = 'rgba(255,246,226,0.92)';
+    g.fillRect(S / 2 - 3.2, y0, 6.4, h);
+    g.fillRect(x0, y0 + h * 0.44, w, 5.5);
+
+    g.fillStyle = light;
+    g.beginPath();
+    g.ellipse(S / 2 - 8, y0 - 1, 9, 6, -0.5, 0, TAU);
+    g.ellipse(S / 2 + 8, y0 - 1, 9, 6, 0.5, 0, TAU);
+    g.fill();
+    return c;
+  }
+
+  const GIFT_PALETTE = [
+    ['#d8344a', '#ff6f7f'],
+    ['#2f8fd8', '#6fd0ff'],
+    ['#f4f0ff', '#ffffff'],
+    ['#e8902a', '#ffc46b'],
+    ['#2fa86a', '#7ef0a0'],
+    ['#c93fa0', '#ff86d4'],
+  ];
+  const GIFT_SPR = GIFT_PALETTE.map((p) => giftSprite(p[0], p[1]));
+
   /* ============================================================
      场景尺寸 / 相机
      ============================================================ */
@@ -281,6 +333,7 @@
   const stars = [];   // 背景星
   const dust = [];    // 飘雪 / 浮尘
   const bokehs = [];  // 焦外光斑
+  const gifts = [];   // 礼物盒（可被吹散）
 
   // 半径轮廓：圆锥 + 每圈起点的“裙摆”外扩，形成分层剪影
   function radiusProfile(t) {
@@ -331,7 +384,7 @@
         y: t * TREE_H + rand(-0.1, 0.1),
         z: Math.sin(ang) * rad,
         sz: rand(0.024, 0.058),
-        a: (0.13 + 0.72 * wgt) * rand(0.75, 1),
+        a: (0.16 + 0.78 * wgt) * rand(0.78, 1),
         col: wgt > 0.5 ? pick(TREE_COL) : pick(['lilac', 'pink', 'ice', 'white']),
         ph: Math.random() * TAU,
         fq: rand(0.8, 3.0),
@@ -340,7 +393,7 @@
     }
 
     // 2b) 内部淡淡的体积雾
-    const fill = Math.round(1200 * Q);
+    const fill = Math.round(1700 * Q);
     for (let i = 0; i < fill; i++) {
       const t = Math.pow(Math.random(), 0.9);
       const prof = radiusProfile(t);
@@ -351,7 +404,7 @@
         y: t * TREE_H + rand(-0.08, 0.08),
         z: Math.sin(ang) * rad,
         sz: rand(0.02, 0.042),
-        a: rand(0.09, 0.22),
+        a: rand(0.12, 0.3),
         col: pick(['lilac', 'violet', 'pink']),
         ph: Math.random() * TAU,
         fq: rand(0.7, 2.2),
@@ -507,9 +560,59 @@
     }
   }
 
+  // 礼物盒：散布在树体内外，交互时会被吹开
+  function addGifts() {
+    const n = Math.round(85 * Q);
+    for (let i = 0; i < n; i++) {
+      const t = Math.pow(Math.random(), 1.25);          // 底部稠密
+      const prof = radiusProfile(t);
+      const r = TREE_R * prof * Math.sqrt(Math.random()) * 1.02;
+      const ang = Math.random() * TAU;
+      const big = Math.random() < 0.18;
+      gifts.push({
+        x: Math.cos(ang) * r,
+        y: t * TREE_H + rand(-0.25, 0.25),
+        z: Math.sin(ang) * r,
+        sz: big ? rand(0.26, 0.4) : rand(0.12, 0.23),
+        col: (Math.random() * GIFT_SPR.length) | 0,
+        a: rand(0.5, 0.95),
+        ph: Math.random() * TAU,
+        spin: rand(0.5, 1.6) * (Math.random() < 0.5 ? -1 : 1),
+      });
+    }
+    // 树冠外侧飘着的几件
+    for (let i = 0; i < Math.round(14 * Q); i++) {
+      const ang = Math.random() * TAU;
+      const r = TREE_R * rand(0.85, 1.5);
+      gifts.push({
+        x: Math.cos(ang) * r,
+        y: rand(1.2, TREE_H * 0.95),
+        z: Math.sin(ang) * r,
+        sz: rand(0.11, 0.2),
+        col: (Math.random() * GIFT_SPR.length) | 0,
+        a: rand(0.35, 0.75),
+        ph: Math.random() * TAU,
+        spin: rand(0.4, 1.2) * (Math.random() < 0.5 ? -1 : 1),
+      });
+    }
+  }
+
+  // 位移 / 速度初值：交互吹散所需的物理量
+  function initPhysics(arr) {
+    for (let i = 0; i < arr.length; i++) {
+      const p = arr[i];
+      p.ox = 0; p.oy = 0; p.oz = 0;
+      p.vx = 0; p.vy = 0; p.vz = 0;
+    }
+  }
+
   addTree();
   addGround();
   addSky();
+  addGifts();
+  initPhysics(tree);
+  initPhysics(ground);
+  initPhysics(gifts);
 
   /* ============================================================
      尺寸 / 背景 / 泛光缓冲
@@ -610,6 +713,108 @@
   }
 
   /* ============================================================
+     交互：鼠标探针 + 吹散物理
+     ============================================================ */
+  const REPEL_R = 4.2;                 // 影响半径（世界单位）
+  const REPEL_R2 = REPEL_R * REPEL_R;
+  const REPEL_FORCE = 260;             // 推力
+  const SPRING = 21;                   // 回位弹力
+  const DAMP = 5.2;                    // 阻尼
+
+  let probeActive = false;
+  let probeX = 0, probeY = 0, probeZ = 0;
+  let pointerX = -999, pointerY = -999;
+
+  // 屏幕坐标 → 相机前方 dist 处的探针世界坐标
+  function setProbe(sx, sy) {
+    pointerX = sx; pointerY = sy;
+    const nx = (sx - W * 0.5) / focal;
+    const ny = (H * 0.5 - sy) / focal;
+    let dx = fx + rx * nx + ux * ny;
+    let dy = fy + ry * nx + uy * ny;
+    let dz = fz + rz * nx + uz * ny;
+    const l = Math.hypot(dx, dy, dz) || 1;
+    dx /= l; dy /= l; dz /= l;
+    const t = cam.dist;
+    probeX = camX + dx * t;
+    probeY = camY + dy * t;
+    probeZ = camZ + dz * t;
+    probeActive = true;
+  }
+
+  // 点击：给探针附近粒子一个向外冲量
+  function burst() {
+    applyBurst(tree, 26);
+    applyBurst(gifts, 34);
+  }
+
+  function updatePhysics(arr, dt) {
+    const px = probeX, py = probeY, pz = probeZ;
+    const active = probeActive;
+    const R2 = REPEL_R2;
+    const knead = REPEL_FORCE * dt;
+    const dampK = (1 - DAMP * dt);
+    const springK = SPRING * dt;
+
+    for (let i = 0; i < arr.length; i++) {
+      const p = arr[i];
+      let ox = p.ox, oy = p.oy, oz = p.oz;
+      let vx = p.vx, vy = p.vy, vz = p.vz;
+      const calm = (ox === 0 && oy === 0 && oz === 0 && vx === 0 && vy === 0 && vz === 0);
+
+      if (calm) {
+        if (!active) continue;
+        const ddx = p.x - px, ddy = p.y - py, ddz = p.z - pz;
+        if (ddx * ddx + ddy * ddy + ddz * ddz > R2) continue;
+      }
+
+      // 排斥
+      if (active) {
+        const ddx = p.x + ox - px;
+        const ddy = p.y + oy - py;
+        const ddz = p.z + oz - pz;
+        const d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+        if (d2 < R2) {
+          const d = Math.max(0.25, Math.sqrt(d2));
+          const f = 1 - d / REPEL_R;
+          const k = (f * f * knead) / d;
+          vx += ddx * k; vy += ddy * k; vz += ddz * k;
+        }
+      }
+
+      // 弹回原位
+      vx = (vx - ox * springK) * dampK;
+      vy = (vy - oy * springK) * dampK;
+      vz = (vz - oz * springK) * dampK;
+      ox += vx * dt; oy += vy * dt; oz += vz * dt;
+
+      // 静止后归零，避免长期漂移
+      if (Math.abs(ox) + Math.abs(oy) + Math.abs(oz) < 0.0015 &&
+          Math.abs(vx) + Math.abs(vy) + Math.abs(vz) < 0.0015) {
+        ox = oy = oz = vx = vy = vz = 0;
+      }
+      p.ox = ox; p.oy = oy; p.oz = oz;
+      p.vx = vx; p.vy = vy; p.vz = vz;
+    }
+  }
+
+  // 点击产生的冲击波：越近推得越远
+  function applyBurst(arr, power) {
+    if (!probeActive) return;
+    for (let i = 0; i < arr.length; i++) {
+      const p = arr[i];
+      const dx = p.x + p.ox - probeX;
+      const dy = p.y + p.oy - probeY;
+      const dz = p.z + p.oz - probeZ;
+      const d = Math.max(0.3, Math.hypot(dx, dy, dz));
+      if (d > 7) continue;
+      const f = 1 - d / 7;
+      const k = (f * f * power) / d;
+      p.vx += dx * k; p.vy += dy * k; p.vz += dz * k;
+    }
+  }
+
+  /* ============================================================
      绘制工具
      ============================================================ */
   // 自适应画质：持续掉帧时按比例跳过粒子（10 = 全画，7 / 5 = 降载）
@@ -638,7 +843,7 @@
     for (let i = 0; i < T.length; i++) {
       if (i % 10 >= qKeep) continue;
       const p = T[i];
-      const dxp = p.x - camX, dyp = p.y - camY, dzp = p.z - camZ;
+      const dxp = p.x + p.ox - camX, dyp = p.y + p.oy - camY, dzp = p.z + p.oz - camZ;
       const cz = dxp * fx + dyp * fy + dzp * fz;
       if (cz < 1.4) continue;
       const cx = dxp * rx + dzp * rz;
@@ -654,6 +859,49 @@
       const tw = 0.72 + 0.28 * Math.sin(p.ht * 11 - time * 2.0) + 0.1 * Math.sin(time * p.fq + p.ph);
       blit(LOOKUP[p.col], sx, sy, size, p.a * tw * df);
     }
+  }
+
+  // 礼物盒：伪 3D 翻转的彩色卡片
+  function drawGifts(time) {
+    const G = gifts;
+    for (let i = 0; i < G.length; i++) {
+      const p = G[i];
+      const dxp = p.x + p.ox - camX, dyp = p.y + p.oy - camY, dzp = p.z + p.oz - camZ;
+      const cz = dxp * fx + dyp * fy + dzp * fz;
+      if (cz < 1.4) continue;
+      const cx = dxp * rx + dzp * rz;
+      const cyy = dxp * ux + dyp * uy + dzp * uz;
+      const sx = W * 0.5 + (cx / cz) * focal;
+      const sy = H * 0.5 - (cyy / cz) * focal;
+      const size = (p.sz * focal) / cz;
+      if (size < 1.4) continue;
+      if (sx < -90 || sx > W + 90 || sy < -90 || sy > H + 90) continue;
+
+      const df = cz < 14 ? 1 : 1 - (cz - 14) * 0.014;
+      const a = p.ph + time * p.spin;
+      const wob = 0.3 + 0.7 * Math.abs(Math.cos(a));
+
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, p.a * df);
+      ctx.translate(sx, sy);
+      ctx.rotate(Math.sin(a * 0.7) * 0.16);
+      ctx.drawImage(GIFT_SPR[p.col], (-size * wob) / 2, -size / 2, size * wob, size);
+      ctx.restore();
+    }
+  }
+
+  // 指针处的柔光，提示交互中心
+  function drawProbe(time) {
+    if (!probeActive) return;
+    const s = (74 + 14 * Math.sin(time * 3.2)) * 1.0;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.07;
+    ctx.drawImage(SPR.pink.glow, pointerX - s, pointerY - s, s * 2, s * 2);
+    ctx.globalAlpha = 0.12;
+    const c = s * 0.36;
+    ctx.drawImage(SPR.white.glow, pointerX - c, pointerY - c, c * 2, c * 2);
+    ctx.restore();
   }
 
   function drawGround(time, dt) {
@@ -850,6 +1098,7 @@
   let dragX = 0, dragY = 0;
   let idleTimer = 0;
   let hintHidden = false;
+  const isTouch = 'ontouchstart' in window || (matchMedia && matchMedia('(hover: none)').matches);
 
   function hideHint() {
     if (hintHidden) return;
@@ -864,9 +1113,13 @@
     document.body.classList.add('dragging');
     canvas.setPointerCapture?.(e.pointerId);
     hideHint();
+    setProbe(e.clientX, e.clientY);
+    burst();
   });
 
   canvas.addEventListener('pointermove', (e) => {
+    // 鼠标移动即吹散（触屏则随手指）
+    setProbe(e.clientX, e.clientY);
     if (!dragging) return;
     const dx = e.clientX - dragX;
     const dy = e.clientY - dragY;
@@ -881,11 +1134,15 @@
     dragging = false;
     document.body.classList.remove('dragging');
     idleTimer = 0;
+    if (!isTouch) probeActive = false;   // 触屏抬手即停止吹散
   };
   canvas.addEventListener('pointerup', endDrag);
   window.addEventListener('pointerup', endDrag);
   canvas.addEventListener('pointercancel', endDrag);
-  canvas.addEventListener('pointerleave', endDrag);
+  canvas.addEventListener('pointerleave', () => {
+    endDrag();
+    probeActive = false;
+  });
 
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
@@ -902,11 +1159,15 @@
 
   window.addEventListener('resize', resize);
 
+  // 触屏设备换文案
+  if (isTouch) hintEl.textContent = '手指按住拖动 · 轻点爆开礼盒';
+
   /* ============================================================
      主循环
      ============================================================ */
   const params = new URLSearchParams(location.search);
   let time = parseFloat(params.get('t')) || 0;
+  const dbgProbe = params.get('probe');   // 调试用：固定交互点，如 ?probe=640,400
   let last = performance.now();
 
   resize();
@@ -927,6 +1188,15 @@
     if (!dragging && idleTimer > 1.4) cam.yaw += 0.075 * dt;
 
     updateCamera(time, dt);
+
+    if (dbgProbe) {
+      const q = dbgProbe.split(',');
+      setProbe(parseFloat(q[0]) || W * 0.5, parseFloat(q[1]) || H * 0.5);
+    }
+
+    // 交互物理：鼠标附近的粒子被推开、随后弹回
+    updatePhysics(tree, dt);
+    updatePhysics(gifts, dt);
 
     // 自适应降载
     perfAcc += dt;
@@ -949,6 +1219,12 @@
     drawBaseGlow(time);
     drawTree(time);
     drawStar(time);
+    drawProbe(time);
+    ctx.globalAlpha = 1;
+
+    // 礼物盒：正常混合，保持彩色实体感
+    ctx.globalCompositeOperation = 'source-over';
+    drawGifts(time);
     ctx.globalAlpha = 1;
 
     bloom();
